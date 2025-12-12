@@ -1,14 +1,30 @@
+# 开发相关
 .vscode/**
 .vscode-test/**
+.github/**
 out/**
 node_modules/**
 src/**
+webview/**
+prompts/**
+
+# 配置文件
 .gitignore
 .yarnrc
+.npmrc
 esbuild.js
 vsc-extension-quickstart.md
 **/tsconfig.json
 **/eslint.config.mjs
+pnpm-lock.yaml
+
+# 源码和调试文件
 **/*.map
 **/*.ts
+**/*.tsx
 **/.vscode-test.*
+
+# 其他
+*.vsix
+reference.tsx
+2025-*.json
