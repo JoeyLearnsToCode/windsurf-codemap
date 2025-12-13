@@ -4,8 +4,24 @@
 
 import * as vscode from 'vscode';
 import type { Codemap } from '../types';
-import { generateFastCodemap, generateSmartCodemap, isConfigured, generateSuggestions } from '../agent';
-import { saveCodemap, listCodemaps, deleteCodemap, loadCodemap, getStoragePath, getCodemapFilePath } from '../storage/codemapStorage';
+import {
+  generateFastCodemap,
+  generateSmartCodemap,
+  isConfigured,
+  generateSuggestions,
+  retryTraceFromStage12Context,
+  retryMermaidFromStage12Context,
+  generateMermaidFromCodemapSnapshot,
+} from '../agent';
+import {
+  saveCodemap,
+  listCodemaps,
+  deleteCodemap,
+  loadCodemap,
+  getStoragePath,
+  getCodemapFilePath,
+  updateCodemap,
+} from '../storage/codemapStorage';
 import * as logger from '../logger';
 
 interface ActiveAgent {
@@ -120,6 +136,18 @@ export class CodemapViewProvider implements vscode.WebviewViewProvider {
         case 'submit':
           await this._handleSubmit(message.query, message.mode);
           break;
+        case 'ensureMermaidDiagram':
+          await this._ensureMermaidDiagram();
+          break;
+        case 'retryTrace':
+          await this._retryTrace(message.traceId);
+          break;
+        case 'retryAllTraces':
+          await this._retryAllTraces();
+          break;
+        case 'regenerateMermaidDiagram':
+          await this._regenerateMermaidDiagram();
+          break;
         case 'openFile':
           this._openFile(message.path, message.line);
           break;
@@ -143,6 +171,329 @@ export class CodemapViewProvider implements vscode.WebviewViewProvider {
           break;
       }
     });
+  }
+
+  private async _ensureMermaidDiagram(): Promise<void> {
+    if (this._isProcessing) {
+      return;
+    }
+    if (!this._view || !this._codemap) {
+      return;
+    }
+    if (this._codemap.mermaidDiagram && this._codemap.mermaidDiagram.trim().length > 0) {
+      return;
+    }
+
+    if (!isConfigured()) {
+      vscode.window.showErrorMessage('Please set your OpenAI API key first');
+      return;
+    }
+
+    this._isProcessing = true;
+    this._progress = {
+      totalStages: 1,
+      completedStages: 0,
+      activeAgents: [
+        { id: 'mermaid', label: 'Generating Mermaid diagram...', startTime: Date.now() },
+      ],
+      currentPhase: 'Generating Mermaid diagram...',
+    };
+    this._updateWebview();
+
+    try {
+      const result = this._codemap.stage12Context
+        ? await retryMermaidFromStage12Context(this._codemap.stage12Context)
+        : await generateMermaidFromCodemapSnapshot(this._codemap);
+
+      if (result.error) {
+        throw new Error(result.error);
+      }
+      if (!result.diagram || result.diagram.trim().length === 0) {
+        throw new Error('No mermaid diagram returned');
+      }
+
+      this._codemap = {
+        ...this._codemap,
+        mermaidDiagram: result.diagram.trim(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      if (this._currentCodemapFilename) {
+        updateCodemap(this._currentCodemapFilename, this._codemap);
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      vscode.window.showErrorMessage(`Failed to generate Mermaid diagram: ${msg}`);
+    } finally {
+      this._isProcessing = false;
+      this._progress = null;
+      this._updateWebview();
+    }
+  }
+
+  private async _retryTrace(traceId: string): Promise<void> {
+    if (this._isProcessing) {
+      return;
+    }
+    if (!this._view || !this._codemap) {
+      return;
+    }
+
+    const ctx = this._codemap.stage12Context;
+    if (!ctx) {
+      vscode.window.showErrorMessage(
+        'This codemap cannot be retried (missing stage12Context). Regenerate the codemap first.'
+      );
+      return;
+    }
+    if (!isConfigured()) {
+      vscode.window.showErrorMessage('Please set your OpenAI API key first');
+      return;
+    }
+
+    const trace = this._codemap.traces.find((t) => t.id === traceId);
+    if (!trace) {
+      vscode.window.showErrorMessage(`Trace not found: ${traceId}`);
+      return;
+    }
+
+    this._isProcessing = true;
+    const completed = new Set<number>();
+    this._progress = {
+      totalStages: 3,
+      completedStages: 0,
+      activeAgents: [{ id: `trace-${traceId}`, label: `Retrying Trace ${traceId}...`, startTime: Date.now() }],
+      currentPhase: 'Retrying trace...',
+    };
+    this._updateWebview();
+
+    try {
+      const stageLabels: Record<number, string> = {
+        3: `Generating relation tree for Trace ${traceId}...`,
+        4: `Adding location decorations for Trace ${traceId}...`,
+        5: `Generating trace guide for Trace ${traceId}...`,
+      };
+
+      const result = await retryTraceFromStage12Context(traceId, ctx, {
+        onTraceProcessing: (_tid, stage, status) => {
+          if (!this._progress) {
+            return;
+          }
+          if (status === 'start') {
+            const idx = this._progress.activeAgents.findIndex((a) => a.id === `trace-${traceId}`);
+            const label = stageLabels[stage] || `Retrying Trace ${traceId}...`;
+            if (idx >= 0) {
+              this._progress.activeAgents[idx].label = label;
+            }
+            this._progress.currentPhase = 'Retrying trace...';
+          } else {
+            completed.add(stage);
+            this._progress.completedStages = completed.size;
+            if (completed.size >= 3) {
+              this._progress.activeAgents = this._progress.activeAgents.filter((a) => a.id !== `trace-${traceId}`);
+            }
+          }
+          this._updateWebview();
+        },
+      });
+
+      if (result.error) {
+        throw new Error(result.error);
+      }
+      if (result.diagram) {
+        trace.traceTextDiagram = result.diagram;
+      }
+      if (result.guide) {
+        trace.traceGuide = result.guide;
+      }
+
+      this._codemap = {
+        ...this._codemap,
+        query: this._codemap.query || ctx.query,
+        mode: this._codemap.mode || ctx.mode,
+        updatedAt: new Date().toISOString(),
+      };
+
+      if (this._currentCodemapFilename) {
+        updateCodemap(this._currentCodemapFilename, this._codemap);
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      vscode.window.showErrorMessage(`Failed to retry trace ${traceId}: ${msg}`);
+    } finally {
+      this._isProcessing = false;
+      this._progress = null;
+      this._updateWebview();
+    }
+  }
+
+  private async _retryAllTraces(): Promise<void> {
+    if (this._isProcessing) {
+      return;
+    }
+    if (!this._view || !this._codemap) {
+      return;
+    }
+
+    const ctx = this._codemap.stage12Context;
+    if (!ctx) {
+      vscode.window.showErrorMessage(
+        'This codemap cannot be retried (missing stage12Context). Regenerate the codemap first.'
+      );
+      return;
+    }
+    if (!isConfigured()) {
+      vscode.window.showErrorMessage('Please set your OpenAI API key first');
+      return;
+    }
+    if (this._codemap.traces.length === 0) {
+      return;
+    }
+
+    const traceStages: Map<string, Set<number>> = new Map();
+    const stageLabelsFor = (traceId: string): Record<number, string> => ({
+      3: `Generating relation tree for Trace ${traceId}...`,
+      4: `Adding location decorations for Trace ${traceId}...`,
+      5: `Generating trace guide for Trace ${traceId}...`,
+    });
+
+    this._isProcessing = true;
+    this._progress = {
+      totalStages: this._codemap.traces.length * 3,
+      completedStages: 0,
+      activeAgents: [{ id: 'retry-all', label: 'Retrying all traces...', startTime: Date.now() }],
+      currentPhase: 'Retrying all traces...',
+    };
+    this._updateWebview();
+
+    try {
+      const results = await Promise.all(
+        this._codemap.traces.map(async (t) => {
+          const traceId = t.id;
+          const labels = stageLabelsFor(traceId);
+          const res = await retryTraceFromStage12Context(traceId, ctx, {
+            onTraceProcessing: (tid, stage, status) => {
+              if (!this._progress) {
+                return;
+              }
+              if (!traceStages.has(tid)) {
+                traceStages.set(tid, new Set());
+              }
+
+              if (status === 'start') {
+                const label = labels[stage] || `Retrying Trace ${tid}...`;
+                const existingIdx = this._progress.activeAgents.findIndex((a) => a.id === `trace-${tid}`);
+                if (existingIdx >= 0) {
+                  this._progress.activeAgents[existingIdx].label = label;
+                } else {
+                  this._progress.activeAgents.push({ id: `trace-${tid}`, label, startTime: Date.now() });
+                }
+                this._progress.currentPhase = 'Retrying all traces...';
+              } else {
+                traceStages.get(tid)!.add(stage);
+                let completedStages = 0;
+                for (const s of traceStages.values()) {
+                  completedStages += s.size;
+                }
+                this._progress.completedStages = completedStages;
+                if (traceStages.get(tid)!.size >= 3) {
+                  this._progress.activeAgents = this._progress.activeAgents.filter((a) => a.id !== `trace-${tid}`);
+                }
+              }
+              this._updateWebview();
+            },
+          });
+          return { traceId, res };
+        })
+      );
+
+      for (const { traceId, res } of results) {
+        const trace = this._codemap.traces.find((x) => x.id === traceId);
+        if (!trace) {
+          continue;
+        }
+        if (res.error) {
+          logger.warn(`Retry trace ${traceId} failed: ${res.error}`);
+          continue;
+        }
+        if (res.diagram) {
+          trace.traceTextDiagram = res.diagram;
+        }
+        if (res.guide) {
+          trace.traceGuide = res.guide;
+        }
+      }
+
+      this._codemap = {
+        ...this._codemap,
+        query: this._codemap.query || ctx.query,
+        mode: this._codemap.mode || ctx.mode,
+        updatedAt: new Date().toISOString(),
+      };
+
+      if (this._currentCodemapFilename) {
+        updateCodemap(this._currentCodemapFilename, this._codemap);
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      vscode.window.showErrorMessage(`Failed to retry all traces: ${msg}`);
+    } finally {
+      this._isProcessing = false;
+      this._progress = null;
+      this._updateWebview();
+    }
+  }
+
+  private async _regenerateMermaidDiagram(): Promise<void> {
+    if (this._isProcessing) {
+      return;
+    }
+    if (!this._view || !this._codemap) {
+      return;
+    }
+    if (!isConfigured()) {
+      vscode.window.showErrorMessage('Please set your OpenAI API key first');
+      return;
+    }
+
+    this._isProcessing = true;
+    this._progress = {
+      totalStages: 1,
+      completedStages: 0,
+      activeAgents: [{ id: 'mermaid', label: 'Regenerating Mermaid diagram...', startTime: Date.now() }],
+      currentPhase: 'Regenerating Mermaid diagram...',
+    };
+    this._updateWebview();
+
+    try {
+      const result = this._codemap.stage12Context
+        ? await retryMermaidFromStage12Context(this._codemap.stage12Context)
+        : await generateMermaidFromCodemapSnapshot(this._codemap);
+
+      if (result.error) {
+        throw new Error(result.error);
+      }
+      if (!result.diagram || result.diagram.trim().length === 0) {
+        throw new Error('No mermaid diagram returned');
+      }
+
+      this._codemap = {
+        ...this._codemap,
+        mermaidDiagram: result.diagram.trim(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      if (this._currentCodemapFilename) {
+        updateCodemap(this._currentCodemapFilename, this._codemap);
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      vscode.window.showErrorMessage(`Failed to regenerate Mermaid diagram: ${msg}`);
+    } finally {
+      this._isProcessing = false;
+      this._progress = null;
+      this._updateWebview();
+    }
   }
 
   public showHome() {
@@ -223,6 +574,7 @@ export class CodemapViewProvider implements vscode.WebviewViewProvider {
     // Track trace stages for progress calculation
     const traceStages: Map<string, Set<number>> = new Map();
     let numTraces = 0;
+    let stage12Context: Codemap['stage12Context'] | undefined = undefined;
 
     const callbacks = {
       onMessage: (role: string, content: string) => {
@@ -240,7 +592,9 @@ export class CodemapViewProvider implements vscode.WebviewViewProvider {
       },
       onCodemapUpdate: (codemap: Codemap) => {
         logger.info(`[Callback] onCodemapUpdate - title: ${codemap.title}, traces: ${codemap.traces.length}`);
-        this._codemap = codemap;
+        this._codemap = stage12Context
+          ? { ...codemap, stage12Context, query, mode }
+          : { ...codemap, query, mode };
         
         // Update total stages when we know the number of traces
         if (codemap.traces.length > 0 && numTraces !== codemap.traces.length) {
@@ -252,6 +606,13 @@ export class CodemapViewProvider implements vscode.WebviewViewProvider {
         }
         
         this._updateWebview();
+      },
+      onStage12ContextReady: (context: Codemap['stage12Context']) => {
+        stage12Context = context;
+        if (this._codemap) {
+          this._codemap = { ...this._codemap, stage12Context, query, mode };
+          this._updateWebview();
+        }
       },
       onPhaseChange: (phase: string, stageNumber: number) => {
         logger.info(`[Callback] onPhaseChange - phase: ${phase}, stage: ${stageNumber}`);

@@ -76,6 +76,28 @@ export function saveCodemap(codemap: Codemap): string {
 }
 
 /**
+ * Update an existing codemap file in-place.
+ * Used when we want to add/refresh fields (e.g., mermaidDiagram) without creating a new history entry.
+ */
+export function updateCodemap(filename: string, codemap: Codemap): boolean {
+  const storageDir = getCodemapStorageDir();
+  const filePath = path.join(storageDir, filename);
+
+  try {
+    const data = {
+      ...codemap,
+      savedAt: codemap.savedAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      workspacePath: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || codemap.workspacePath || '',
+    };
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * List all saved codemaps for current workspace
  */
 export function listCodemaps(): Array<{ filename: string; codemap: Codemap & { savedAt: string } }> {
