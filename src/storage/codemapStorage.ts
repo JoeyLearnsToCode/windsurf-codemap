@@ -83,7 +83,7 @@ export function listCodemaps(): Array<{ filename: string; codemap: Codemap & { s
   
   try {
     const files = fs.readdirSync(storageDir)
-      .filter(f => f.endsWith('.json'))
+      .filter(f => f.endsWith('.json') && !f.endsWith('.context.json'))
       .sort()
       .reverse(); // Most recent first
     

@@ -2,6 +2,8 @@
  * Codemap type definitions
  */
 
+import type { CodemapStage12ContextV1 } from './agent';
+
 export interface CodemapLocation {
   id: string;
   path: string;
@@ -25,6 +27,20 @@ export interface Codemap {
   description: string;
   traces: CodemapTrace[];
   mermaidDiagram?: string;
+  /**
+   * Persisted Stage 1-2 shared context for retrying later stages without re-running research.
+   * Stored inside the same codemap JSON (no sidecar file).
+   */
+  stage12Context?: CodemapStage12ContextV1;
+  /**
+   * Optional metadata persisted by Codemap storage layer (backwards compatible).
+   */
+  savedAt?: string;
+  workspacePath?: string;
+  query?: string;
+  mode?: 'fast' | 'smart';
+  schemaVersion?: number;
+  updatedAt?: string;
 }
 
 export interface CodemapSuggestion {

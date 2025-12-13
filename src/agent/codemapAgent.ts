@@ -35,9 +35,35 @@ export interface CodemapCallbacks {
   onCodemapUpdate?: (codemap: Codemap) => void;
   onPhaseChange?: (phase: string, stageNumber: number) => void;
   onTraceProcessing?: (traceId: string, stage: number, status: 'start' | 'complete') => void;
+  /**
+   * Fired once Stage 1 (research) and Stage 2 (structure) are complete enough to
+   * run downstream stages (trace processing / mermaid). This is the "shared context"
+   * the user wants persisted for retries.
+   */
+  onStage12ContextReady?: (context: CodemapStage12ContextV1) => void;
 }
 
 export type CodemapMode = 'fast' | 'smart';
+
+/**
+ * Serializable "shared context" captured after Stage 1 & Stage 2.
+ * Used to retry later stages without re-running research/structure.
+ */
+export interface CodemapStage12ContextV1 {
+  schemaVersion: 1;
+  createdAt: string;
+  query: string;
+  mode: CodemapMode;
+  workspaceRoot: string;
+  currentDate: string;
+  language: string;
+  systemPrompt: string;
+  /**
+   * The exact messages array passed as baseMessages to stages 3-6.
+   * Keep it JSON-serializable (role + string content).
+   */
+  baseMessages: Array<{ role: 'user' | 'assistant'; content: string }>;
+}
 
 /**
  * Result from processing a single trace through stages 3-5
@@ -52,6 +78,13 @@ interface TraceProcessingResult {
 interface MermaidProcessingResult {
   diagram?: string;
   error?: string;
+}
+
+function toCoreMessages(
+  baseMessages: CodemapStage12ContextV1['baseMessages']
+): CoreMessage[] {
+  // `CoreMessage` supports richer shapes, but we only persist string content.
+  return baseMessages.map((m) => ({ role: m.role, content: m.content }));
 }
 
 /**
@@ -166,6 +199,75 @@ async function processTraceStages(
     if (errorStack) {
       logger.error(`[Trace ${traceId}] Stack trace: ${errorStack}`);
     }
+    return { traceId, error: errorMsg };
+  }
+}
+
+/**
+ * Process a single trace through stages 3-4 only (diagram, no guide).
+ * This powers the "retry diagram" action.
+ */
+async function processTraceDiagramStages(
+  traceId: string,
+  systemPrompt: string,
+  baseMessages: CoreMessage[],
+  currentDate: string,
+  language: string,
+  callbacks: CodemapCallbacks = {}
+): Promise<Pick<TraceProcessingResult, 'traceId' | 'diagram' | 'error'>> {
+  logger.info(`[Trace ${traceId}] Starting trace diagram retry (stages 3-4)`);
+
+  const client = getOpenAIClient();
+  if (!client) {
+    logger.error(`[Trace ${traceId}] Failed to create OpenAI client`);
+    return { traceId, error: 'Failed to create OpenAI client' };
+  }
+
+  const messages: CoreMessage[] = [...baseMessages];
+  let diagram: string | undefined;
+
+  try {
+    // Stage 3
+    logger.info(`[Trace ${traceId}] Stage 3: Starting - Generate trace text diagram`);
+    callbacks.onTraceProcessing?.(traceId, 3, 'start');
+    const stage3Prompt = loadTraceStagePrompt(3, traceId, { current_date: currentDate, language });
+    messages.push({ role: 'user', content: stage3Prompt });
+
+    const stage3Result = await generateText({
+      model: client(getModelName()),
+      system: systemPrompt,
+      messages,
+    });
+
+    if (stage3Result.text) {
+      messages.push({ role: 'assistant', content: stage3Result.text });
+      callbacks.onMessage?.('assistant', `[Trace ${traceId} Stage 3] Generated initial diagram`);
+    }
+    callbacks.onTraceProcessing?.(traceId, 3, 'complete');
+
+    // Stage 4
+    logger.info(`[Trace ${traceId}] Stage 4: Starting - Add location decorations`);
+    callbacks.onTraceProcessing?.(traceId, 4, 'start');
+    const stage4Prompt = loadTraceStagePrompt(4, traceId, { current_date: currentDate, language });
+    messages.push({ role: 'user', content: stage4Prompt });
+
+    const stage4Result = await generateText({
+      model: client(getModelName()),
+      system: systemPrompt,
+      messages,
+    });
+
+    if (stage4Result.text) {
+      messages.push({ role: 'assistant', content: stage4Result.text });
+      diagram = extractTraceDiagram(stage4Result.text) || undefined;
+      callbacks.onMessage?.('assistant', `[Trace ${traceId} Stage 4] Added location decorations`);
+    }
+    callbacks.onTraceProcessing?.(traceId, 4, 'complete');
+
+    return { traceId, diagram };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    logger.error(`[Trace ${traceId}] Error during trace diagram retry: ${errorMsg}`);
     return { traceId, error: errorMsg };
   }
 }
@@ -413,6 +515,27 @@ export async function generateCodemap(
         }
         callbacks.onCodemapUpdate?.(resultCodemap);
         callbacks.onMessage?.('system', `Codemap structure generated with ${resultCodemap.traces.length} traces`);
+
+        // Persist stage 1-2 shared context for retries (before we fork into downstream stages).
+        try {
+          callbacks.onStage12ContextReady?.({
+            schemaVersion: 1,
+            createdAt: new Date().toISOString(),
+            query,
+            mode,
+            workspaceRoot,
+            currentDate,
+            language,
+            systemPrompt,
+            baseMessages: messages.map((m) => ({
+              role: m.role as 'user' | 'assistant',
+              content: String(m.content),
+            })),
+          });
+        } catch (e) {
+          logger.warn(`Failed to emit stage12 context: ${e instanceof Error ? e.message : String(e)}`);
+        }
+
         mermaidPromise = processMermaidDiagram(
           systemPrompt,
           messages,
@@ -533,5 +656,63 @@ export async function generateCodemap(
     callbacks.onMessage?.('error', `Error: ${errorMsg}`);
     throw error;
   }
+}
+
+/**
+ * Retry a single trace (stages 3-5) using a saved Stage 1-2 context.
+ */
+export async function retryTraceFromStage12Context(
+  traceId: string,
+  context: CodemapStage12ContextV1,
+  callbacks: CodemapCallbacks = {}
+): Promise<{ diagram?: string; guide?: string; error?: string }> {
+  const baseMessages = toCoreMessages(context.baseMessages);
+  const result = await processTraceStages(
+    traceId,
+    context.systemPrompt,
+    baseMessages,
+    context.currentDate,
+    context.language,
+    callbacks
+  );
+  return { diagram: result.diagram, guide: result.guide, error: result.error };
+}
+
+/**
+ * Retry trace diagram only (stages 3-4) using a saved Stage 1-2 context.
+ */
+export async function retryTraceDiagramFromStage12Context(
+  traceId: string,
+  context: CodemapStage12ContextV1,
+  callbacks: CodemapCallbacks = {}
+): Promise<{ diagram?: string; error?: string }> {
+  const baseMessages = toCoreMessages(context.baseMessages);
+  const result = await processTraceDiagramStages(
+    traceId,
+    context.systemPrompt,
+    baseMessages,
+    context.currentDate,
+    context.language,
+    callbacks
+  );
+  return { diagram: result.diagram, error: result.error };
+}
+
+/**
+ * Retry global Mermaid diagram (stage 6) using a saved Stage 1-2 context.
+ */
+export async function retryMermaidFromStage12Context(
+  context: CodemapStage12ContextV1,
+  callbacks: CodemapCallbacks = {}
+): Promise<{ diagram?: string; error?: string }> {
+  const baseMessages = toCoreMessages(context.baseMessages);
+  const result = await processMermaidDiagram(
+    context.systemPrompt,
+    baseMessages,
+    context.currentDate,
+    context.language,
+    callbacks
+  );
+  return { diagram: result.diagram, error: result.error };
 }
 

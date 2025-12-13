@@ -4,6 +4,14 @@
 
 export { isConfigured, refreshConfig } from './baseClient';
 export { generateSuggestions } from './suggestionAgent';
-export { generateCodemap, type CodemapCallbacks, type CodemapMode } from './codemapAgent';
+export {
+  generateCodemap,
+  retryTraceFromStage12Context,
+  retryTraceDiagramFromStage12Context,
+  retryMermaidFromStage12Context,
+  type CodemapCallbacks,
+  type CodemapMode,
+  type CodemapStage12ContextV1,
+} from './codemapAgent';
 export { generateFastCodemap, type FastCodemapCallbacks } from './fastCodemapAgent';
 export { generateSmartCodemap, type SmartCodemapCallbacks } from './smartCodemapAgent';

@@ -31,8 +31,12 @@ export function generateWorkspaceLayout(workspaceRoot: string, maxDepth: number 
     }
     
     entries.sort((a, b) => {
-      if (a.isDirectory() && !b.isDirectory()) return -1;
-      if (!a.isDirectory() && b.isDirectory()) return 1;
+      if (a.isDirectory() && !b.isDirectory()) {
+        return -1;
+      }
+      if (!a.isDirectory() && b.isDirectory()) {
+        return 1;
+      }
       return a.name.localeCompare(b.name);
     });
     
