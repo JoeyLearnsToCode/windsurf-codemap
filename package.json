@@ -26,7 +26,7 @@
       },
       {
         "command": "codemap.setApiKey",
-        "title": "Codemap: Set OpenAI API4 Key"
+        "title": "Codemap: Set OpenAI API Key"
       },
       {
         "command": "codemap.showStoragePath",
