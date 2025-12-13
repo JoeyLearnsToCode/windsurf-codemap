@@ -32,7 +32,7 @@ When writing mermaid diagrams:
 <user_request>
 make a mermaid diagram now. output it directly using ```mermaid. use node ids like \"1a:\" at the front of your node labels. use subgraphs and annotations.
 
-try to avoid making the diagram too linear; something more like a hub and spoke topology is preferred. minimize super deep, long paths and prefer branching / breadth / shallow graphs.
+**IMPORTANT: try to avoid making the diagram too linear**; something more like a hub and spoke topology is preferred. minimize super deep, long paths and prefer branching / breadth / shallow graphs.
 
 show the non-trivial connections across traces; don't just connect the last node of the previous trace to the first node of the next trace.
 

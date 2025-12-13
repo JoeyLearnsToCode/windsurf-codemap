@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { MermaidPlaceholderToAccentKey } from '../mermaidPlaceholders';
 
 interface MermaidDiagramProps {
   code: string;
@@ -9,7 +10,6 @@ interface MermaidDiagramProps {
 // Dynamic singletons
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let mermaidInstance: any = null;
-let mermaidInitialized = false;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let svgPanZoomFactory: any = null;
 
@@ -18,13 +18,94 @@ function getCssVar(name: string, fallback: string): string {
   return value?.trim() || fallback;
 }
 
+function isVsCodeDarkTheme(): boolean {
+  // VS Code webview sets theme classes on <body>
+  return (
+    document.body.classList.contains('vscode-dark') ||
+    document.body.classList.contains('vscode-high-contrast')
+  );
+}
+
+function colorToHex(input: string): string {
+  const v = input.trim();
+  if (!v) return v;
+  if (v.startsWith('#')) return v;
+
+  // Convert any CSS color string into computed rgb(...) then parse it.
+  const el = document.createElement('div');
+  el.style.color = v;
+  document.body.appendChild(el);
+  const computed = getComputedStyle(el).color;
+  document.body.removeChild(el);
+
+  const match = computed.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+  if (!match) return v;
+  const r = parseInt(match[1], 10);
+  const g = parseInt(match[2], 10);
+  const b = parseInt(match[3], 10);
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b
+    .toString(16)
+    .padStart(2, '0')}`;
+}
+
+type MermaidThemePalette = {
+  sidebarBg: string;
+  sidebarFg: string;
+  editorBg: string;
+  editorFg: string;
+  panelBorder: string;
+  toolbarHoverBg: string;
+  focusBorder: string;
+  accentBlue: string;
+  accentOrange: string;
+  accentPurple: string;
+  accentGreen: string;
+  accentRed: string;
+  accentYellow: string;
+  accentCyan: string;
+  accentPink: string;
+};
+
+function getMermaidThemePalette(): MermaidThemePalette {
+  // Align with windsurf's Code Map: take theme colors from VS Code injected CSS variables.
+  return {
+    sidebarBg: getCssVar('--vscode-sideBar-background', '#252526'),
+    sidebarFg: getCssVar('--vscode-sideBar-foreground', '#cccccc'),
+    editorBg: getCssVar('--vscode-editor-background', '#1e1e1e'),
+    editorFg: getCssVar('--vscode-editor-foreground', '#d4d4d4'),
+    panelBorder: getCssVar('--vscode-panel-border', '#3c3c3c'),
+    toolbarHoverBg: getCssVar('--vscode-toolbar-hoverBackground', '#2a2d2e'),
+    focusBorder: getCssVar('--vscode-focusBorder', '#007fd4'),
+    accentBlue: getCssVar('--vscode-charts-blue', '#a5d8ff'),
+    accentOrange: getCssVar('--vscode-charts-orange', '#ffd8a8'),
+    accentPurple: getCssVar('--vscode-charts-purple', '#d0bfff'),
+    accentGreen: getCssVar('--vscode-charts-green', '#b2f2bb'),
+    accentRed: getCssVar('--vscode-charts-red', '#fcc2d7'),
+    accentYellow: getCssVar('--vscode-charts-yellow', '#ffec99'),
+    accentCyan: getCssVar('--vscode-debugIcon-breakpointForeground', '#99e9f2'),
+    accentPink: getCssVar('--vscode-debugTokenExpression-string', '#eebefa'),
+  };
+}
+
+function applyWindsurfColorSubstitutions(code: string, palette: MermaidThemePalette): string {
+  // windsurf 的 Code Map 会把这些“占位色”替换为当前主题色，并附加 fill-opacity。
+  const opacity = isVsCodeDarkTheme() ? 0.25 : 0.15;
+
+  let out = code;
+  for (const [placeholder, accentKey] of Object.entries(MermaidPlaceholderToAccentKey)) {
+    const actualColor = palette[accentKey as keyof MermaidThemePalette] as string;
+    const replacement = `${colorToHex(actualColor)},fill-opacity:${opacity}`;
+    out = out.replace(new RegExp(placeholder, 'g'), replacement);
+  }
+  return out;
+}
+
 /**
  * After mermaid renders, apply transparency to subgraph cluster backgrounds.
  * Mermaid renders subgraph backgrounds as <rect> inside <g class="cluster">.
  */
 function applySubgraphOpacity(svgElement: SVGSVGElement): void {
-  const isDark = (getCssVar('--vscode-sideBar-background', '#1e1e1e') || '#1e1e1e').toLowerCase() !== '#ffffff';
-  const opacity = isDark ? 0.25 : 0.15;
+  const opacity = isVsCodeDarkTheme() ? 0.25 : 0.15;
 
   // Subgraph clusters in mermaid have class "cluster"
   // Their background rect is the first rect child
@@ -117,11 +198,21 @@ export const MermaidDiagram: React.FC<MermaidDiagramProps> = ({
   const onNodeClickRef = useRef(onNodeClick);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [themeVersion, setThemeVersion] = useState(0);
 
   // Keep the callback ref updated
   useEffect(() => {
     onNodeClickRef.current = onNodeClick;
   }, [onNodeClick]);
+
+  // Re-render when VS Code theme changes (body class changes in webviews)
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      setThemeVersion((v) => v + 1);
+    });
+    observer.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     if (!code || !containerRef.current) {
@@ -144,37 +235,39 @@ export const MermaidDiagram: React.FC<MermaidDiagramProps> = ({
       try {
         const { mermaid, svgPanZoom } = await loadDeps();
 
-        const fg = getCssVar('--vscode-foreground', '#cccccc');
-        const bg = getCssVar('--vscode-sideBar-background', '#1e1e1e');
-        const panelBorder = getCssVar('--vscode-panel-border', '#2b2b2b');
-        const toolbarBg = getCssVar('--vscode-toolbar-hoverBackground', '#3a3a3a');
+        const palette = getMermaidThemePalette();
+        const diagramCode = applyWindsurfColorSubstitutions(code, palette);
 
         mermaid.initialize({
           startOnLoad: false,
           theme: 'base',
           securityLevel: 'loose',
           themeVariables: {
-            fontFamily: getCssVar('--vscode-font-family', 'Segoe UI, Tahoma, Geneva, Verdana, sans-serif'),
-            fontSize: '16px',
-            primaryColor: fg,
-            primaryTextColor: fg,
-            primaryBorderColor: panelBorder,
-            lineColor: fg,
-            background: bg,
-            mainBkg: bg,
-            edgeLabelBackground: bg,
+            fontFamily: getCssVar(
+              '--vscode-font-family',
+              'Segoe UI, Tahoma, Geneva, Verdana, sans-serif',
+            ),
+            fontSize: '18px',
+            primaryColor: palette.editorFg,
+            primaryTextColor: palette.editorFg,
+            primaryBorderColor: palette.editorFg,
+            lineColor: palette.editorFg,
+            background: palette.sidebarBg,
+            mainBkg: palette.sidebarBg,
+            nodeBkg: palette.sidebarBg,
+            edgeLabelBackground: palette.sidebarBg,
           },
           themeCSS: `
-            .label text { fill: ${fg} !important; }
-            .edgeLabel text { fill: ${fg} !important; }
-            .edgeLabel tspan { fill: ${fg} !important; }
-            .nodeLabel { color: ${fg} !important; }
-            .nodeLabel p { color: ${fg} !important; }
-            .nodeLabel span { color: ${fg} !important; }
-            foreignObject div { color: ${fg} !important; }
-            foreignObject span { color: ${fg} !important; }
-            .node rect { stroke: ${panelBorder}; }
-            .cluster rect { stroke: ${panelBorder}; }
+            .label text { fill: ${palette.editorFg} !important; }
+            .edgeLabel text { fill: ${palette.editorFg} !important; }
+            .edgeLabel tspan { fill: ${palette.editorFg} !important; }
+            .nodeLabel { color: ${palette.editorFg} !important; }
+            .nodeLabel p { color: ${palette.editorFg} !important; }
+            .nodeLabel span { color: ${palette.editorFg} !important; }
+            foreignObject div { color: ${palette.editorFg} !important; }
+            foreignObject span { color: ${palette.editorFg} !important; }
+            .node rect { fill: ${palette.sidebarBg} !important; stroke: ${palette.panelBorder} !important; }
+            .cluster rect { stroke: ${palette.panelBorder} !important; }
           `,
           flowchart: {
             useMaxWidth: false,
@@ -193,7 +286,7 @@ export const MermaidDiagram: React.FC<MermaidDiagramProps> = ({
         containerRef.current.innerHTML = '';
 
         const renderId = `${id}-${Date.now()}`;
-        const { svg } = await mermaid.render(renderId, code);
+        const { svg } = await mermaid.render(renderId, diagramCode);
         if (disposed || !containerRef.current) {
           return;
         }
@@ -202,6 +295,7 @@ export const MermaidDiagram: React.FC<MermaidDiagramProps> = ({
         const svgElement = containerRef.current.querySelector('svg');
 
         if (svgElement) {
+          applySubgraphOpacity(svgElement);
 
           // Add click handlers to nodes with step labels
           if (onNodeClickRef.current) {
@@ -246,7 +340,7 @@ export const MermaidDiagram: React.FC<MermaidDiagramProps> = ({
         panZoomRef.current = null;
       }
     };
-  }, [code, id]);
+  }, [code, id, themeVersion]);
 
   const handleZoomIn = () => panZoomRef.current?.zoomIn?.();
   const handleZoomOut = () => panZoomRef.current?.zoomOut?.();
