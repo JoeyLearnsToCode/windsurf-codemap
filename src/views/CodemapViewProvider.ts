@@ -137,7 +137,7 @@ export class CodemapViewProvider implements vscode.WebviewViewProvider {
           await this._handleSubmit(message.query, message.mode);
           break;
         case 'ensureMermaidDiagram':
-          await this._ensureMermaidDiagram();
+          await this._generateMermaidDiagram(false);
           break;
         case 'retryTrace':
           await this._retryTrace(message.traceId);
@@ -146,7 +146,7 @@ export class CodemapViewProvider implements vscode.WebviewViewProvider {
           await this._retryAllTraces();
           break;
         case 'regenerateMermaidDiagram':
-          await this._regenerateMermaidDiagram();
+          await this._generateMermaidDiagram(true);
           break;
         case 'openFile':
           this._openFile(message.path, message.line);
@@ -173,14 +173,20 @@ export class CodemapViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private async _ensureMermaidDiagram(): Promise<void> {
+  /**
+   * Generate or regenerate Mermaid diagram
+   * @param force - If true, regenerate even if diagram already exists
+   */
+  private async _generateMermaidDiagram(force: boolean = false): Promise<void> {
     if (this._isProcessing) {
       return;
     }
     if (!this._view || !this._codemap) {
       return;
     }
-    if (this._codemap.mermaidDiagram && this._codemap.mermaidDiagram.trim().length > 0) {
+    
+    // Non-force mode: skip if diagram already exists
+    if (!force && this._codemap.mermaidDiagram && this._codemap.mermaidDiagram.trim().length > 0) {
       return;
     }
 
@@ -190,13 +196,14 @@ export class CodemapViewProvider implements vscode.WebviewViewProvider {
     }
 
     this._isProcessing = true;
+    const actionLabel = force ? 'Regenerating' : 'Generating';
     this._progress = {
       totalStages: 1,
       completedStages: 0,
       activeAgents: [
-        { id: 'mermaid', label: 'Generating Mermaid diagram...', startTime: Date.now() },
+        { id: 'mermaid', label: `${actionLabel} Mermaid diagram...`, startTime: Date.now() },
       ],
-      currentPhase: 'Generating Mermaid diagram...',
+      currentPhase: `${actionLabel} Mermaid diagram...`,
     };
     this._updateWebview();
 
@@ -223,7 +230,8 @@ export class CodemapViewProvider implements vscode.WebviewViewProvider {
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      vscode.window.showErrorMessage(`Failed to generate Mermaid diagram: ${msg}`);
+      const action = force ? 'regenerate' : 'generate';
+      vscode.window.showErrorMessage(`Failed to ${action} Mermaid diagram: ${msg}`);
     } finally {
       this._isProcessing = false;
       this._progress = null;
@@ -444,57 +452,6 @@ export class CodemapViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async _regenerateMermaidDiagram(): Promise<void> {
-    if (this._isProcessing) {
-      return;
-    }
-    if (!this._view || !this._codemap) {
-      return;
-    }
-    if (!isConfigured()) {
-      vscode.window.showErrorMessage('Please set your OpenAI API key first');
-      return;
-    }
-
-    this._isProcessing = true;
-    this._progress = {
-      totalStages: 1,
-      completedStages: 0,
-      activeAgents: [{ id: 'mermaid', label: 'Regenerating Mermaid diagram...', startTime: Date.now() }],
-      currentPhase: 'Regenerating Mermaid diagram...',
-    };
-    this._updateWebview();
-
-    try {
-      const result = this._codemap.stage12Context
-        ? await retryMermaidFromStage12Context(this._codemap.stage12Context)
-        : await generateMermaidFromCodemapSnapshot(this._codemap);
-
-      if (result.error) {
-        throw new Error(result.error);
-      }
-      if (!result.diagram || result.diagram.trim().length === 0) {
-        throw new Error('No mermaid diagram returned');
-      }
-
-      this._codemap = {
-        ...this._codemap,
-        mermaidDiagram: result.diagram.trim(),
-        updatedAt: new Date().toISOString(),
-      };
-
-      if (this._currentCodemapFilename) {
-        updateCodemap(this._currentCodemapFilename, this._codemap);
-      }
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      vscode.window.showErrorMessage(`Failed to regenerate Mermaid diagram: ${msg}`);
-    } finally {
-      this._isProcessing = false;
-      this._progress = null;
-      this._updateWebview();
-    }
-  }
 
   public showHome() {
     if (this._view) {

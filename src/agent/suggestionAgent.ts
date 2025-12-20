@@ -20,10 +20,7 @@ export async function generateSuggestions(
     return [];
   }
 
-  const client = getOpenAIClient();
-  if (!client) {
-    return [];
-  }
+  const client = getOpenAIClient()!;
 
   // Load user prompt with recent files - no system prompt for this agent
   const userPrompt = loadPrompt('suggestion', 'user', {

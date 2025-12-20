@@ -24,36 +24,32 @@ const templateCache = new Map<string, string>();
  * During development, it's relative to the source
  */
 function getPromptsDir(): string {
-  // __dirname will be dist/ in production, src/prompts/ during dev compilation
-  // We need to go up and find the prompts directory
-  const possiblePaths = [
-    path.join(__dirname, '..', '..', 'prompts'),  // From dist/prompts/index.js
-    path.join(__dirname, '..', 'prompts'),         // From dist/index.js
-    path.join(__dirname, '..', '..', '..', 'prompts'), // Alternative
-  ];
+  // Extension runtime: __dirname = <extension>/dist
+  // Prompts are bundled as files under: <extension>/dist/prompts
+  const promptsDir = path.join(__dirname, 'prompts');
 
-  for (const p of possiblePaths) {
-    if (fs.existsSync(p)) {
-      return p;
-    }
+  if (!fs.existsSync(promptsDir)) {
+    throw new Error(`Prompts directory not found: ${promptsDir}`);
   }
 
-  throw new Error(`Prompts directory not found. Searched: ${possiblePaths.join(', ')}`);
+  return promptsDir;
 }
 
 /**
- * Load a template file from disk
+ * Generic function to load and cache template files
+ * @param cacheKey - Unique cache key for this template
+ * @param filePath - Full path to the template file
+ * @param stripMarkdownHeader - Whether to remove markdown header (default: true)
  */
-function loadTemplateFile(type: PromptType, role: PromptRole): string {
-  const cacheKey = `${type}/${role}`;
-  
+function loadCachedFile(
+  cacheKey: string,
+  filePath: string,
+  stripMarkdownHeader: boolean = true
+): string {
   // Check cache first
   if (templateCache.has(cacheKey)) {
     return templateCache.get(cacheKey)!;
   }
-
-  const promptsDir = getPromptsDir();
-  const filePath = path.join(promptsDir, type, `${role}.md`);
 
   if (!fs.existsSync(filePath)) {
     throw new Error(`Template file not found: ${filePath}`);
@@ -61,13 +57,27 @@ function loadTemplateFile(type: PromptType, role: PromptRole): string {
 
   let content = fs.readFileSync(filePath, 'utf-8');
   
-  // Remove markdown header if present (lines starting with #)
-  content = content.replace(/^#[^\n]*\n+/, '').trim();
+  // Remove markdown header if requested
+  if (stripMarkdownHeader) {
+    content = content.replace(/^#[^\n]*\n+/, '').trim();
+  } else {
+    content = content.trim();
+  }
 
   // Cache the loaded template
   templateCache.set(cacheKey, content);
 
   return content;
+}
+
+/**
+ * Load a template file from disk
+ */
+function loadTemplateFile(type: PromptType, role: PromptRole): string {
+  const cacheKey = `${type}/${role}`;
+  const promptsDir = getPromptsDir();
+  const filePath = path.join(promptsDir, type, `${role}.md`);
+  return loadCachedFile(cacheKey, filePath);
 }
 
 /**
@@ -75,28 +85,9 @@ function loadTemplateFile(type: PromptType, role: PromptRole): string {
  */
 function loadStageTemplateFile(stageNumber: number): string {
   const cacheKey = `smart/stage${stageNumber}`;
-  
-  // Check cache first
-  if (templateCache.has(cacheKey)) {
-    return templateCache.get(cacheKey)!;
-  }
-
   const promptsDir = getPromptsDir();
   const filePath = path.join(promptsDir, 'smart', `stage${stageNumber}.md`);
-
-  if (!fs.existsSync(filePath)) {
-    throw new Error(`Stage template file not found: ${filePath}`);
-  }
-
-  let content = fs.readFileSync(filePath, 'utf-8');
-  
-  // Remove markdown header if present (lines starting with #)
-  content = content.replace(/^#[^\n]*\n+/, '').trim();
-
-  // Cache the loaded template
-  templateCache.set(cacheKey, content);
-
-  return content;
+  return loadCachedFile(cacheKey, filePath);
 }
 
 /**
@@ -104,26 +95,9 @@ function loadStageTemplateFile(stageNumber: number): string {
  */
 function loadMermaidTemplateFile(): string {
   const cacheKey = 'smart/mermaid';
-
-  if (templateCache.has(cacheKey)) {
-    return templateCache.get(cacheKey)!;
-  }
-
   const promptsDir = getPromptsDir();
   const filePath = path.join(promptsDir, 'smart', 'mermaid.md');
-
-  if (!fs.existsSync(filePath)) {
-    throw new Error(`Mermaid template file not found: ${filePath}`);
-  }
-
-  let content = fs.readFileSync(filePath, 'utf-8');
-
-  // Remove markdown header if present (lines starting with #)
-  content = content.replace(/^#[^\n]*\n+/, '').trim();
-
-  templateCache.set(cacheKey, content);
-
-  return content;
+  return loadCachedFile(cacheKey, filePath);
 }
 
 /**
@@ -261,21 +235,9 @@ export function getTemplateTypes(): PromptType[] {
  */
 export function loadMaximizeParallelToolCallsAddon(): string {
   const cacheKey = 'fast/maximize_parallel_tool_calls';
-  
-  if (templateCache.has(cacheKey)) {
-    return templateCache.get(cacheKey)!;
-  }
-
   const promptsDir = getPromptsDir();
   const filePath = path.join(promptsDir, 'fast', 'maximize_parallel_tool_calls.md');
-
-  if (!fs.existsSync(filePath)) {
-    throw new Error(`Maximize parallel tool calls addon not found: ${filePath}`);
-  }
-
-  const content = fs.readFileSync(filePath, 'utf-8').trim();
-  templateCache.set(cacheKey, content);
-
-  return content;
+  // This file doesn't have a markdown header, so we don't strip it
+  return loadCachedFile(cacheKey, filePath, false);
 }
 

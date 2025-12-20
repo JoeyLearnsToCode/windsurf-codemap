@@ -56,13 +56,22 @@ function extractSubgraphIds(diagram: string): string[] {
   return ids;
 }
 
-function stripFillFromStyleLine(line: string): string | null {
-  const m = line.match(/^\s*style\s+([^\s]+)\s+(.+)\s*$/i);
+/**
+ * Strip fill and fill-opacity from style or classDef lines
+ * @param line - The line to process
+ * @param keyword - Either 'style' or 'classDef'
+ */
+function stripFillFromLine(line: string, keyword: 'style' | 'classDef'): string | null {
+  const pattern = keyword === 'style'
+    ? /^\s*style\s+([^\s]+)\s+(.+)\s*$/i
+    : /^\s*classDef\s+([^\s]+)\s+(.+)\s*$/i;
+  
+  const m = line.match(pattern);
   if (!m) {
     return line;
   }
 
-  const target = m[1];
+  const name = m[1];
   const styles = m[2];
 
   const parts = styles
@@ -77,31 +86,7 @@ function stripFillFromStyleLine(line: string): string | null {
   if (kept.length === 0) {
     return null;
   }
-  return `style ${target} ${kept.join(',')}`;
-}
-
-function stripFillFromClassDefLine(line: string): string | null {
-  const m = line.match(/^\s*classDef\s+([^\s]+)\s+(.+)\s*$/i);
-  if (!m) {
-    return line;
-  }
-
-  const className = m[1];
-  const styles = m[2];
-
-  const parts = styles
-    .split(',')
-    .map((p) => p.trim())
-    .filter(Boolean);
-
-  const kept = parts.filter(
-    (p) => !/^fill\s*:/i.test(p) && !/^fill-opacity\s*:/i.test(p)
-  );
-
-  if (kept.length === 0) {
-    return null;
-  }
-  return `classDef ${className} ${kept.join(',')}`;
+  return `${keyword} ${name} ${kept.join(',')}`;
 }
 
 /**
@@ -121,15 +106,29 @@ export function colorizeMermaidDiagram(diagram: string): string {
 
   const sanitizedLines: string[] = [];
   for (const line of normalized.split('\n')) {
-    const maybeStyle = stripFillFromStyleLine(line);
-    if (maybeStyle === null) {
-      continue;
+    // Try style first - if it's a style line, this will process it
+    let processed = stripFillFromLine(line, 'style');
+    // If it was a style line and all styles were removed, skip it
+    if (processed === null) {
+      // Check if it was actually a style line (not just a non-matching line)
+      if (/^\s*style\s+/i.test(line)) {
+        continue;
+      }
+      // Not a style line, so keep original and try classDef
+      processed = line;
     }
-    const maybeClassDef = stripFillFromClassDefLine(maybeStyle);
-    if (maybeClassDef === null) {
-      continue;
+    // Now try classDef on the processed line
+    processed = stripFillFromLine(processed, 'classDef');
+    // If it was a classDef line and all styles were removed, skip it
+    if (processed === null) {
+      // Check if it was actually a classDef line
+      if (/^\s*classDef\s+/i.test(line)) {
+        continue;
+      }
+      // Not a classDef line either, keep original
+      processed = line;
     }
-    sanitizedLines.push(maybeClassDef);
+    sanitizedLines.push(processed);
   }
 
   const sanitized = sanitizedLines.join('\n').trim();

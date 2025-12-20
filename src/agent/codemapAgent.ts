@@ -76,6 +76,13 @@ interface TraceProcessingResult {
   error?: string;
 }
 
+/**
+ * Options for trace processing
+ */
+interface TraceProcessingOptions {
+  includeGuide?: boolean;  // Whether to execute Stage 5 to generate guide
+}
+
 interface MermaidProcessingResult {
   diagram?: string;
   error?: string;
@@ -89,7 +96,7 @@ function toCoreMessages(
 }
 
 /**
- * Process a single trace through stages 3-5
+ * Process a single trace through stages 3-5 (or 3-4 if includeGuide is false)
  */
 async function processTraceStages(
   traceId: string,
@@ -97,15 +104,13 @@ async function processTraceStages(
   baseMessages: CoreMessage[],
   currentDate: string,
   language: string,
-  callbacks: CodemapCallbacks = {}
+  callbacks: CodemapCallbacks = {},
+  options: TraceProcessingOptions = { includeGuide: true }
 ): Promise<TraceProcessingResult> {
-  logger.info(`[Trace ${traceId}] Starting trace processing (stages 3-5)`);
+  const stagesDescription = options.includeGuide ? 'stages 3-5' : 'stages 3-4';
+  logger.info(`[Trace ${traceId}] Starting trace processing (${stagesDescription})`);
   
-  const client = getOpenAIClient();
-  if (!client) {
-    logger.error(`[Trace ${traceId}] Failed to create OpenAI client`);
-    return { traceId, error: 'Failed to create OpenAI client' };
-  }
+  const client = getOpenAIClient()!;
 
   const messages: CoreMessage[] = [...baseMessages];
   let diagram: string | undefined;
@@ -164,32 +169,34 @@ async function processTraceStages(
     callbacks.onTraceProcessing?.(traceId, 4, 'complete');
     logger.info(`[Trace ${traceId}] Stage 4: Complete`);
 
-    // Stage 5: Generate trace guide
-    logger.info(`[Trace ${traceId}] Stage 5: Starting - Generate trace guide`);
-    callbacks.onTraceProcessing?.(traceId, 5, 'start');
-    const stage5Prompt = loadTraceStagePrompt(5, traceId, { current_date: currentDate, language });
-    messages.push({ role: 'user', content: stage5Prompt });
+    // Stage 5: Generate trace guide (only if includeGuide is true)
+    if (options.includeGuide) {
+      logger.info(`[Trace ${traceId}] Stage 5: Starting - Generate trace guide`);
+      callbacks.onTraceProcessing?.(traceId, 5, 'start');
+      const stage5Prompt = loadTraceStagePrompt(5, traceId, { current_date: currentDate, language });
+      messages.push({ role: 'user', content: stage5Prompt });
 
-    logger.info(`[Trace ${traceId}] Stage 5: Calling API...`);
-    const stage5Result = await generateText({
-      model: client(getModelName()),
-      system: systemPrompt,
-      messages,
-    });
-    logger.info(`[Trace ${traceId}] Stage 5: API response received, text length: ${stage5Result.text?.length || 0}`);
+      logger.info(`[Trace ${traceId}] Stage 5: Calling API...`);
+      const stage5Result = await generateText({
+        model: client(getModelName()),
+        system: systemPrompt,
+        messages,
+      });
+      logger.info(`[Trace ${traceId}] Stage 5: API response received, text length: ${stage5Result.text?.length || 0}`);
 
-    if (stage5Result.text) {
-      guide = extractTraceGuide(stage5Result.text) || undefined;
-      logger.info(`[Trace ${traceId}] Stage 5: Guide extracted: ${guide ? 'YES' : 'NO'}`);
-      if (guide) {
-        logger.debug(`[Trace ${traceId}] Stage 5: Guide length: ${guide.length}`);
+      if (stage5Result.text) {
+        guide = extractTraceGuide(stage5Result.text) || undefined;
+        logger.info(`[Trace ${traceId}] Stage 5: Guide extracted: ${guide ? 'YES' : 'NO'}`);
+        if (guide) {
+          logger.debug(`[Trace ${traceId}] Stage 5: Guide length: ${guide.length}`);
+        }
+        callbacks.onMessage?.('assistant', `[Trace ${traceId} Stage 5] Generated guide`);
+      } else {
+        logger.warn(`[Trace ${traceId}] Stage 5: No text in response`);
       }
-      callbacks.onMessage?.('assistant', `[Trace ${traceId} Stage 5] Generated guide`);
-    } else {
-      logger.warn(`[Trace ${traceId}] Stage 5: No text in response`);
+      callbacks.onTraceProcessing?.(traceId, 5, 'complete');
+      logger.info(`[Trace ${traceId}] Stage 5: Complete`);
     }
-    callbacks.onTraceProcessing?.(traceId, 5, 'complete');
-    logger.info(`[Trace ${traceId}] Stage 5: Complete`);
 
     logger.info(`[Trace ${traceId}] Trace processing complete - diagram: ${!!diagram}, guide: ${!!guide}`);
     return { traceId, diagram, guide };
@@ -204,74 +211,6 @@ async function processTraceStages(
   }
 }
 
-/**
- * Process a single trace through stages 3-4 only (diagram, no guide).
- * This powers the "retry diagram" action.
- */
-async function processTraceDiagramStages(
-  traceId: string,
-  systemPrompt: string,
-  baseMessages: CoreMessage[],
-  currentDate: string,
-  language: string,
-  callbacks: CodemapCallbacks = {}
-): Promise<Pick<TraceProcessingResult, 'traceId' | 'diagram' | 'error'>> {
-  logger.info(`[Trace ${traceId}] Starting trace diagram retry (stages 3-4)`);
-
-  const client = getOpenAIClient();
-  if (!client) {
-    logger.error(`[Trace ${traceId}] Failed to create OpenAI client`);
-    return { traceId, error: 'Failed to create OpenAI client' };
-  }
-
-  const messages: CoreMessage[] = [...baseMessages];
-  let diagram: string | undefined;
-
-  try {
-    // Stage 3
-    logger.info(`[Trace ${traceId}] Stage 3: Starting - Generate trace text diagram`);
-    callbacks.onTraceProcessing?.(traceId, 3, 'start');
-    const stage3Prompt = loadTraceStagePrompt(3, traceId, { current_date: currentDate, language });
-    messages.push({ role: 'user', content: stage3Prompt });
-
-    const stage3Result = await generateText({
-      model: client(getModelName()),
-      system: systemPrompt,
-      messages,
-    });
-
-    if (stage3Result.text) {
-      messages.push({ role: 'assistant', content: stage3Result.text });
-      callbacks.onMessage?.('assistant', `[Trace ${traceId} Stage 3] Generated initial diagram`);
-    }
-    callbacks.onTraceProcessing?.(traceId, 3, 'complete');
-
-    // Stage 4
-    logger.info(`[Trace ${traceId}] Stage 4: Starting - Add location decorations`);
-    callbacks.onTraceProcessing?.(traceId, 4, 'start');
-    const stage4Prompt = loadTraceStagePrompt(4, traceId, { current_date: currentDate, language });
-    messages.push({ role: 'user', content: stage4Prompt });
-
-    const stage4Result = await generateText({
-      model: client(getModelName()),
-      system: systemPrompt,
-      messages,
-    });
-
-    if (stage4Result.text) {
-      messages.push({ role: 'assistant', content: stage4Result.text });
-      diagram = extractTraceDiagram(stage4Result.text) || undefined;
-      callbacks.onMessage?.('assistant', `[Trace ${traceId} Stage 4] Added location decorations`);
-    }
-    callbacks.onTraceProcessing?.(traceId, 4, 'complete');
-
-    return { traceId, diagram };
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    logger.error(`[Trace ${traceId}] Error during trace diagram retry: ${errorMsg}`);
-    return { traceId, error: errorMsg };
-  }
-}
 
 /**
  * Generate a global mermaid diagram using the mermaid prompt
@@ -285,11 +224,7 @@ async function processMermaidDiagram(
 ): Promise<MermaidProcessingResult> {
   logger.info('[Mermaid] Starting mermaid diagram generation');
 
-  const client = getOpenAIClient();
-  if (!client) {
-    logger.error('[Mermaid] Failed to create OpenAI client');
-    return { error: 'Failed to create OpenAI client' };
-  }
+  const client = getOpenAIClient()!;
 
   const messages: CoreMessage[] = [...baseMessages];
 
@@ -361,11 +296,7 @@ export async function generateCodemap(
     throw new Error('OpenAI API key not configured');
   }
 
-  const client = getOpenAIClient();
-  if (!client) {
-    logger.error('Failed to create OpenAI client');
-    throw new Error('Failed to create OpenAI client');
-  }
+  const client = getOpenAIClient()!;
   logger.info('OpenAI client created successfully');
 
   // Prepare template variables
@@ -689,13 +620,14 @@ export async function retryTraceDiagramFromStage12Context(
   callbacks: CodemapCallbacks = {}
 ): Promise<{ diagram?: string; error?: string }> {
   const baseMessages = toCoreMessages(context.baseMessages);
-  const result = await processTraceDiagramStages(
+  const result = await processTraceStages(
     traceId,
     context.systemPrompt,
     baseMessages,
     context.currentDate,
     context.language,
-    callbacks
+    callbacks,
+    { includeGuide: false }
   );
   return { diagram: result.diagram, error: result.error };
 }

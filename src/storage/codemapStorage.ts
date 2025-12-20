@@ -11,19 +11,33 @@ import type { Codemap } from '../types';
 const COMETIX_DIR = '.cometix';
 const CODEMAP_SUBDIR = 'codemap';
 
+// Cache for storage directory to avoid repeated filesystem checks
+let cachedStorageDir: string | null = null;
+let cachedWorkspaceName: string | null = null;
+
 /**
  * Get the storage directory for the current workspace
  * Returns: ~/.cometix/codemap/<workspace-name>/
  */
 export function getCodemapStorageDir(): string {
-  const homeDir = os.homedir();
   const workspaceName = getWorkspaceName();
+  
+  // Return cached directory if workspace hasn't changed
+  if (cachedStorageDir && cachedWorkspaceName === workspaceName) {
+    return cachedStorageDir;
+  }
+  
+  const homeDir = os.homedir();
   const storageDir = path.join(homeDir, COMETIX_DIR, CODEMAP_SUBDIR, workspaceName);
   
   // Ensure directory exists
   if (!fs.existsSync(storageDir)) {
     fs.mkdirSync(storageDir, { recursive: true });
   }
+  
+  // Update cache
+  cachedStorageDir = storageDir;
+  cachedWorkspaceName = workspaceName;
   
   return storageDir;
 }

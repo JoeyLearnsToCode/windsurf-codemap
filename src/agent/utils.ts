@@ -124,8 +124,8 @@ export function extractMermaidDiagram(text: string): string | null {
   if (codeBlockMatch) {
     return codeBlockMatch[0].replace(/```/g, '').trim();
   }
-  const trimmed = text.trim();
-  return trimmed.length > 0 ? trimmed : null;
+  // If no code block found, return null instead of the entire text
+  return null;
 }
 
 /**

@@ -51,7 +51,7 @@ export function log(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', message: string,
     fullMessage += ` ${argsStr}`;
   }
   
-  outputChannel?.appendLine(fullMessage);
+  outputChannel!.appendLine(fullMessage);
   
   // Also log to console for development
   if (level === 'ERROR') {
